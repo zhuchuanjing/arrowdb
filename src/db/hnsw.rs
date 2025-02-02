@@ -261,7 +261,7 @@ impl HNSW {
         Ok(id.id())
     }
 
-    pub fn search(&self, data: Vec<f32>, number: usize, ef: usize) -> Result<Vec<OrderId<f32>>> {
+    pub fn search(&self, data: Vec<f32>, number: usize) -> Result<Vec<(u64, f32)>> {
         if self.insert_id.size() == 0 {
             return Ok(Vec::new());
         }
@@ -280,10 +280,11 @@ impl HNSW {
                 }
             }
         }
-        let ef = ef.max(number);
+        let ef = self.ef.max(number);
         let neighbors_heap = self.search_layer(&mut qid, &mut pivot, ef, 0)?;
         let mut neighbors = neighbors_heap.into_sorted_vec();
         neighbors.truncate(number.min(ef));
-        Ok(neighbors)
+        let ids: Vec<(u64, f32)> = neighbors.into_iter().map(|p| (p.point.id(), p.dist) ).collect();
+        Ok(ids)
     }
 }
