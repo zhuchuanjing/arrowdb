@@ -22,7 +22,7 @@ fn main() -> Result<()> {
 
     let data_with_id = data.iter().zip(0..data.len()).collect::<Vec<_>>();  // give an id to each data
 
-    let (dim, hns) = arrow_db.get_hnsw("test2").unwrap();
+    let hns = arrow_db.get_hnsw("test2", dim)?;
     for _i in 0..data_with_id.len() {
         hns.insert(data_with_id[_i].0.clone());
     }
