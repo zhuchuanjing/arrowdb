@@ -93,12 +93,15 @@ impl ArrowDB {
         Ok(())
     }
 
-    pub fn get_hnsw(&self, name: &str)-> Result<(usize, HNSW)> {
+    pub fn get_hnsw(&self, name: &str, dim: usize)-> Result<HNSW> {
         if let Some(info) = self.collections.read().unwrap().get(name) {
+            if info.dimension != dim {
+                return Err(anyhow!("collection dimension {} is not equal {}", info.dimension, dim));
+            }
             if !self.hnsws.read().unwrap().contains_key(name) {
                 self.add_hnsw(name, info);
             }
-            Ok((info.dimension, self.hnsws.read().unwrap().get(name).unwrap().clone()))
+            Ok(self.hnsws.read().unwrap().get(name).unwrap().clone())
         } else {
             Err(anyhow!("collection {} do not existed", name))
         }
