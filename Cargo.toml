@@ -1,6 +1,6 @@
 [package]
 name = "arrowdb"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "高性能本地向量数据库."
 license = "MIT OR Apache-2.0"
@@ -15,6 +15,9 @@ rmp-serde = "1.3"
 serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0.94"
 rustc-hash = "2.1"
+rayon = "1.10"
 
 [[example]]
 name = "simple"
+[[example]]
+name = "parallel"
