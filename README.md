@@ -45,7 +45,7 @@ fn main() -> Result<()> {
     for _i in 0..data_with_id.len() {
         hns.insert(data_with_id[_i].0.clone());
     }
-    println!("{:?}", hns.search(data_with_id[100].0.clone(), 10, 200));
+    println!("{:?}", hns.search(data_with_id[100].0.clone(), 10));
     Ok(())
 }
 ```
