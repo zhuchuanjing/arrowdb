@@ -2,6 +2,7 @@ use anyhow::Result;
 use arrowdb::db::ArrowDB;
 use rand::distributions::Uniform;
 use rand::prelude::*;
+use rayon::prelude::*;
 
 fn main() -> Result<()> {
     let arrow_db = ArrowDB::new("arrow_db");
@@ -20,12 +21,13 @@ fn main() -> Result<()> {
         data.push(column);
     }
 
-    let data_with_id = data.iter().zip(0..data.len()).collect::<Vec<_>>();  // give an id to each data
+    let data_with_id = data.iter().zip(0..data.len()).collect::<Vec<_>>();
 
     let hns = arrow_db.get_hnsw("test2", dim)?;
-    for _i in 0..data_with_id.len() {
-        hns.insert(data_with_id[_i].0.clone());
-    }
+    let ids: Vec<u64> = data_with_id.par_iter().map(|&data|
+        hns.insert(data.0.clone()).unwrap()
+    ).collect();
+
     println!("{:?}", hns.search(data_with_id[100].0.clone(), 10));
     Ok(())
 }
