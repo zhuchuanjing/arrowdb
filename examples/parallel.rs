@@ -24,7 +24,7 @@ fn main() -> Result<()> {
     let data_with_id = data.iter().zip(0..data.len()).collect::<Vec<_>>();
 
     let hns = arrow_db.get_hnsw("test2", dim)?;
-    let ids: Vec<u64> = data_with_id.par_iter().map(|&data|
+    let _ids: Vec<u64> = data_with_id.par_iter().map(|&data|
         hns.insert(data.0.clone()).unwrap()
     ).collect();
 

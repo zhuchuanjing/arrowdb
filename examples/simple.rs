@@ -24,7 +24,7 @@ fn main() -> Result<()> {
 
     let hns = arrow_db.get_hnsw("test2", dim)?;
     for _i in 0..data_with_id.len() {
-        hns.insert(data_with_id[_i].0.clone());
+        let _ = hns.insert(data_with_id[_i].0.clone());
     }
     println!("{:?}", hns.search(data_with_id[100].0.clone(), 10));
     Ok(())
