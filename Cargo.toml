@@ -1,6 +1,6 @@
 [package]
 name = "arrowdb"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "高性能本地向量数据库."
 license = "MIT OR Apache-2.0"
@@ -22,3 +22,5 @@ rayon = "1.10"
 name = "simple"
 [[example]]
 name = "parallel"
+[[example]]
+name = "batch"

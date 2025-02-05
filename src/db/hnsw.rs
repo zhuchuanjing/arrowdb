@@ -1,30 +1,31 @@
 #![allow(dead_code)]
-use bytes::{Bytes, BytesMut};
-use scc::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
-use super::order_id::{Point, OrderId, LevelVec};
 use super::layer::LayerGenerator;
+use super::order_id::{LevelVec, OrderId, Point};
 use super::unique_id::QueryID;
+use super::Dist;
 use super::PersistID;
 use crate::store::KVStore;
 use anyhow::Result;
-use super::Dist;
+use bytes::{Bytes, BytesMut};
+use scc::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
+use rayon::prelude::*;
 
 #[derive(Clone)]
-pub struct HNSW<T: KVStore + Clone> {
+pub struct HNSW<T: KVStore + Clone + Send + Sync> {
     max_nb: usize,
     ef: usize,
     layer_g: Arc<Mutex<LayerGenerator>>,
     query_id: QueryID,
     pub(crate) dist_f: Dist,
-    arrows: Arc<HashMap<u64, Arc<Vec<f32>>>>,                     //每个 id 的向量数据
-    neighbors: Arc<HashMap<u64, Arc<RwLock<LevelVec<f32>>>>>,     //每个 id 的邻居数据
+    arrows: Arc<HashMap<u64, Arc<Vec<f32>>>>,                 //每个 id 的向量数据
+    neighbors: Arc<HashMap<u64, Arc<RwLock<LevelVec<f32>>>>>, //每个 id 的邻居数据
     store: T,
 }
 
-use rustc_hash::{FxHashSet, FxHashMap};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BinaryHeap;
-impl<T: KVStore + Clone> HNSW<T> {
+impl<T: KVStore + Clone + Send + Sync> HNSW<T> {
     pub fn new(store: T, max_nb: usize, ef: usize, max_level: usize, dist_f: Dist) -> Self {
         Self {
             max_nb,
@@ -38,12 +39,12 @@ impl<T: KVStore + Clone> HNSW<T> {
         }
     }
 
-    pub fn set_arrow(&self, id: u64, arrow: Vec<f32>)-> Result<()> {
-        self.arrows.update(&id, |_, v| *v = Arc::new(arrow) );
+    pub fn set_arrow(&self, id: u64, arrow: Vec<f32>) -> Result<()> {
+        self.arrows.update(&id, |_, v| *v = Arc::new(arrow));
         self.save_arrow(id)
     }
 
-    fn get_id(prefix: &[u8], id: u64)-> Bytes {
+    fn get_id(prefix: &[u8], id: u64) -> Bytes {
         let mut b = BytesMut::with_capacity(16);
         b.extend_from_slice(prefix);
         b.extend_from_slice(&id.to_le_bytes());
@@ -67,25 +68,27 @@ impl<T: KVStore + Clone> HNSW<T> {
         Ok(self.arrows.get(&id).unwrap().get().clone())
     }
 
-    fn get_neighbor(&self, point: &mut Point<f32>)-> Result<Arc<RwLock<LevelVec<f32>>>> {
+    fn get_neighbor(&self, point: &mut Point<f32>) -> Result<Arc<RwLock<LevelVec<f32>>>> {
         if point.neighbor.is_none() {
             let id = point.id();
             if !self.neighbors.contains(&id) {
                 let slice = self.store.get(HNSW::<T>::get_id(b"N", id))?;
                 let ids: Vec<(u64, f32)> = super::u8_to_vec(slice.to_vec());
                 let mut neighbor = LevelVec::<f32>::default();
-                ids.into_iter().for_each(|(id, dist)| { neighbor.push(OrderId::new(id, dist), None); });
+                ids.into_iter().for_each(|(id, dist)| {
+                    neighbor.push(OrderId::new(id, dist), None);
+                });
                 let _ = self.neighbors.insert(id, Arc::new(RwLock::new(neighbor)));
             }
             let neighbor = self.neighbors.get(&id).unwrap().get().clone();
             point.neighbor.replace(neighbor.clone());
             Ok(neighbor)
         } else {
-            Ok(point.neighbor.as_ref().map(|n| n.clone() ).unwrap())
+            Ok(point.neighbor.as_ref().map(|n| n.clone()).unwrap())
         }
     }
 
-    fn distance(&self, point: &mut Point<f32>, other: &mut Point<f32>)-> Result<f32> {
+    fn distance(&self, point: &mut Point<f32>, other: &mut Point<f32>) -> Result<f32> {
         if point.arrow.is_none() {
             let arrow = self.get_arrow(point.id())?;
             point.arrow.replace(arrow);
@@ -120,7 +123,7 @@ impl<T: KVStore + Clone> HNSW<T> {
                     if opt.is_none() {
                         return Ok(return_points);
                     }
-                    if let Ok(e_dist_to_p) = self.distance(id, &mut n.point){
+                    if let Ok(e_dist_to_p) = self.distance(id, &mut n.point) {
                         let f_dist_to_p = opt.unwrap().dist;
                         if e_dist_to_p < f_dist_to_p || return_points.len() < ef {
                             let e_prime = n.point.to_order_id(e_dist_to_p);
@@ -157,7 +160,7 @@ impl<T: KVStore + Clone> HNSW<T> {
                 set.insert(c.point.id(), c.point.clone());
                 set
             });
-            let keys: FxHashSet<u64> = candidates_set.keys().map(|k| k.clone() ).collect();
+            let keys: FxHashSet<u64> = candidates_set.keys().map(|k| k.clone()).collect();
             let mut new_candidates_set = FxHashMap::<u64, Point<f32>>::default();
             for (_, mut cp) in &mut candidates_set {
                 let cp_neighbor = self.get_neighbor(&mut cp)?.read().unwrap().get(id.level());
@@ -176,9 +179,7 @@ impl<T: KVStore + Clone> HNSW<T> {
         }
         while !candidates.is_empty() && neighbor.len() < asked {
             if let Some(mut e_p) = candidates.pop() {
-                if neighbor.iter_mut().position(|n|
-                    self.distance(&mut e_p.point, &mut n.point).map(|dist| dist <= -e_p.dist ).unwrap_or(false)
-                ).is_none() {
+                if neighbor.iter_mut().position(|n| self.distance(&mut e_p.point, &mut n.point).map(|dist| dist <= -e_p.dist).unwrap_or(false)).is_none() {
                     neighbor.push(e_p.point.to_order_id(-e_p.dist));
                 }
             }
@@ -187,7 +188,7 @@ impl<T: KVStore + Clone> HNSW<T> {
     }
 
     fn reverse_update_neighbor(&self, point: &mut Point<f32>) -> Result<Vec<u64>> {
-        let mut updated = Vec::new();
+        let mut updated = vec![point.id()];
         let neighbor = self.get_neighbor(point)?.read().unwrap().clone();
         for mut n in neighbor.value {
             if n.point.level() <= point.level() && n.point.id() != point.id() {
@@ -200,13 +201,13 @@ impl<T: KVStore + Clone> HNSW<T> {
         Ok(updated)
     }
 
-    fn save_neighbor(&self, id: u64)-> Result<()> {
+    fn save_neighbor(&self, id: u64) -> Result<()> {
         let nid = HNSW::<T>::get_id(b"N", id);
         let buf = Bytes::from_owner(self.neighbors.get(&id).unwrap().read().unwrap().to_vec());
         self.store.set(nid, buf)
     }
 
-    fn save_arrow(&self, id: u64)-> Result<()> {
+    fn save_arrow(&self, id: u64) -> Result<()> {
         let aid = HNSW::<T>::get_id(b"A", id);
         let arrow = self.get_arrow(id)?.as_ref().clone();
         self.store.set(aid, Bytes::from_owner(super::vec_to_u8(arrow)))
@@ -214,12 +215,42 @@ impl<T: KVStore + Clone> HNSW<T> {
 
     pub fn insert(&self, arrow: Vec<f32>) -> Result<u64> {
         let id = self.store.get_id();
+        let _ = self.neighbors.insert(id, Arc::new(RwLock::new(LevelVec::default())));
         let _ = self.arrows.insert(id, Arc::new(arrow));
         self.save_arrow(id)?;
-        let _ = self.neighbors.insert(id, Arc::new(RwLock::new(LevelVec::default())));
+        let updated = self.insert_id(id)?;
+        for _id in updated {
+            self.save_neighbor(_id)?;
+        }
+        Ok(id)
+    }
+
+    pub fn insert_batch(&self, arrows: Vec<Vec<f32>>) -> Result<Vec<u64>> {
+        let modified = Arc::new(RwLock::new(FxHashSet::<u64>::default()));
+        let ids: Vec<u64> = arrows
+            .into_par_iter()
+            .map(|arrow| {
+                let id = self.store.get_id();
+                let _ = self.neighbors.insert(id, Arc::new(RwLock::new(LevelVec::default())));
+                let _ = self.arrows.insert(id, Arc::new(arrow));
+                self.save_arrow(id).unwrap();
+                let _ = modified.write().map(|mut m| {
+                    for _id in self.insert_id(id).unwrap() {
+                        m.insert(_id);
+                    }
+                });
+                id
+            })
+            .collect();
+        for _id in modified.read().unwrap().clone() {
+            self.save_neighbor(_id)?;
+        }
+        Ok(ids)
+    }
+
+    fn insert_id(&self, id: u64) -> Result<Vec<u64>> {
         if id == 0 {
-            let _ = self.save_neighbor(id);
-            return Ok(id);
+            return Ok(vec![0]);
         }
         let level = self.layer_g.lock().unwrap().generate();
         let mut id = Point::new(id, level);
@@ -256,12 +287,9 @@ impl<T: KVStore + Clone> HNSW<T> {
                 self.get_neighbor(&mut id)?.write().unwrap().append(&mut neighbor);
             }
         }
-        let _ = self.save_neighbor(id.id());                               //在这里写入 id 和 updated 的 id 到持续化介质
-        for _id in self.reverse_update_neighbor(&mut id)? {
-            let _ = self.save_neighbor(_id);
-        }
+        let updated = self.reverse_update_neighbor(&mut id)?;
         self.store.set_entry(level, id.id());
-        Ok(id.id())
+        Ok(updated)
     }
 
     pub fn search(&self, data: Vec<f32>, number: usize) -> Result<Vec<(u64, f32)>> {
@@ -287,7 +315,7 @@ impl<T: KVStore + Clone> HNSW<T> {
         let neighbors_heap = self.search_layer(&mut qid, &mut pivot, ef, 0)?;
         let mut neighbors = neighbors_heap.into_sorted_vec();
         neighbors.truncate(number.min(ef));
-        let ids: Vec<(u64, f32)> = neighbors.into_iter().map(|p| (p.point.id(), p.dist) ).collect();
+        let ids: Vec<(u64, f32)> = neighbors.into_iter().map(|p| (p.point.id(), p.dist)).collect();
         Ok(ids)
     }
 }

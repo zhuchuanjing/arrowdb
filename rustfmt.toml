@@ -1,0 +1,12 @@
+max_width = 200
+indent_style = "Block"
+reorder_imports = false
+use_small_heuristics = "Max"
+fn_params_layout = "Compressed"
+fn_call_width = 200
+fn_single_line = true
+fn_args_layout = "Compressed"
+overflow_delimited_expr = true
+chain_width = 200
+array_width = 200
+short_array_element_width_threshold = 40
