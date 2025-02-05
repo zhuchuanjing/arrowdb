@@ -1,44 +1,40 @@
 #![allow(dead_code)]
+use bytes::{Bytes, BytesMut};
 use scc::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use super::order_id::{Point, OrderId, LevelVec};
-use fjall::{PartitionCreateOptions, TxKeyspace, TxPartition};
 use super::layer::LayerGenerator;
-use super::unique_id::{QueryID, PersistID};
-use anyhow::{anyhow, Result};
+use super::unique_id::QueryID;
+use super::PersistID;
+use crate::store::KVStore;
+use anyhow::Result;
 use super::Dist;
 
 #[derive(Clone)]
-pub struct HNSW {
+pub struct HNSW<T: KVStore + Clone> {
     max_nb: usize,
     ef: usize,
     layer_g: Arc<Mutex<LayerGenerator>>,
     query_id: QueryID,
-    insert_id: PersistID,
     pub(crate) dist_f: Dist,
     arrows: Arc<HashMap<u64, Arc<Vec<f32>>>>,                     //每个 id 的向量数据
     neighbors: Arc<HashMap<u64, Arc<RwLock<LevelVec<f32>>>>>,     //每个 id 的邻居数据
-    arrow_db: TxPartition,
-    neighbor_db: TxPartition,
+    store: T,
 }
 
 use rustc_hash::{FxHashSet, FxHashMap};
 use std::collections::BinaryHeap;
-impl HNSW {
-    pub fn new(name: &str, space: &TxKeyspace, max_nb: usize, ef: usize, max_level: usize, dist_f: Dist) -> Self {
-        let arrow_db = space.open_partition(&format!("#arrow#{}", name), PartitionCreateOptions::default()).unwrap();
-        let neighbor_db = space.open_partition(&format!("#neighbor#{}", name), PartitionCreateOptions::default()).unwrap();
-        let idx = space.open_partition(&format!("#idx#{}", name), PartitionCreateOptions::default()).unwrap();
+impl<T: KVStore + Clone> HNSW<T> {
+    pub fn new(store: T, max_nb: usize, ef: usize, max_level: usize, dist_f: Dist) -> Self {
         Self {
             max_nb,
             ef,
             layer_g: Arc::new(Mutex::new(LayerGenerator::new(max_nb, max_level))),
             query_id: QueryID::default(),
-            insert_id: PersistID::new(idx),
             dist_f,
             arrows: Arc::new(HashMap::new()),
             neighbors: Arc::new(HashMap::new()),
-            arrow_db, neighbor_db,
+            store,
         }
     }
 
@@ -47,18 +43,25 @@ impl HNSW {
         self.save_arrow(id)
     }
 
+    fn get_id(prefix: &[u8], id: u64)-> Bytes {
+        let mut b = BytesMut::with_capacity(16);
+        b.extend_from_slice(prefix);
+        b.extend_from_slice(&id.to_le_bytes());
+        b.freeze()
+    }
+
     pub fn remove(&self, id: u64) {
-        let (_, entry_id) = self.insert_id.entry();
+        let (_, entry_id) = self.store.entry();
         if id != entry_id {
-            let _ = self.arrow_db.remove(id.to_le_bytes());
+            let _ = self.store.remove(HNSW::<T>::get_id(b"A", id));
             self.arrows.remove(&id);
         }
     }
 
     fn get_arrow(&self, id: u64) -> Result<Arc<Vec<f32>>> {
         if !self.arrows.contains(&id) {
-            let slice = self.arrow_db.get(id.to_le_bytes())?.ok_or(anyhow!("no {} arrow", id))?.to_vec();
-            let arrow: Vec<f32> = super::u8_to_vec(slice);
+            let slice = self.store.get(HNSW::<T>::get_id(b"A", id))?;
+            let arrow: Vec<f32> = super::u8_to_vec(slice.to_vec());
             let _ = self.arrows.insert(id, Arc::new(arrow));
         }
         Ok(self.arrows.get(&id).unwrap().get().clone())
@@ -68,8 +71,8 @@ impl HNSW {
         if point.neighbor.is_none() {
             let id = point.id();
             if !self.neighbors.contains(&id) {
-                let slice = self.neighbor_db.get(id.to_le_bytes())?.unwrap().to_vec();
-                let ids: Vec<(u64, f32)> = super::u8_to_vec(slice);
+                let slice = self.store.get(HNSW::<T>::get_id(b"N", id))?;
+                let ids: Vec<(u64, f32)> = super::u8_to_vec(slice.to_vec());
                 let mut neighbor = LevelVec::<f32>::default();
                 ids.into_iter().for_each(|(id, dist)| { neighbor.push(OrderId::new(id, dist), None); });
                 let _ = self.neighbors.insert(id, Arc::new(RwLock::new(neighbor)));
@@ -198,19 +201,19 @@ impl HNSW {
     }
 
     fn save_neighbor(&self, id: u64)-> Result<()> {
-        let buf = self.neighbors.get(&id).unwrap().read().unwrap().to_vec();
-        self.neighbor_db.insert(id.to_le_bytes(), &buf)?;
-        Ok(())
+        let nid = HNSW::<T>::get_id(b"N", id);
+        let buf = Bytes::from_owner(self.neighbors.get(&id).unwrap().read().unwrap().to_vec());
+        self.store.set(nid, buf)
     }
 
     fn save_arrow(&self, id: u64)-> Result<()> {
+        let aid = HNSW::<T>::get_id(b"A", id);
         let arrow = self.get_arrow(id)?.as_ref().clone();
-        self.arrow_db.insert(id.to_le_bytes(), super::vec_to_u8(arrow).as_slice())?;
-        Ok(())
+        self.store.set(aid, Bytes::from_owner(super::vec_to_u8(arrow)))
     }
 
     pub fn insert(&self, arrow: Vec<f32>) -> Result<u64> {
-        let id = self.insert_id.get();
+        let id = self.store.get_id();
         let _ = self.arrows.insert(id, Arc::new(arrow));
         self.save_arrow(id)?;
         let _ = self.neighbors.insert(id, Arc::new(RwLock::new(LevelVec::default())));
@@ -220,7 +223,7 @@ impl HNSW {
         }
         let level = self.layer_g.lock().unwrap().generate();
         let mut id = Point::new(id, level);
-        let (max_level_observed, entry) = self.insert_id.entry();
+        let (max_level_observed, entry) = self.store.entry();
         let mut entry = Point::new(entry, level);
         let mut dist_to_entry = self.distance(&mut id, &mut entry)?;
         for l in ((level + 1)..(max_level_observed + 1)).rev() {
@@ -257,15 +260,15 @@ impl HNSW {
         for _id in self.reverse_update_neighbor(&mut id)? {
             let _ = self.save_neighbor(_id);
         }
-        self.insert_id.set_entry(level, id.id());
+        self.store.set_entry(level, id.id());
         Ok(id.id())
     }
 
     pub fn search(&self, data: Vec<f32>, number: usize) -> Result<Vec<(u64, f32)>> {
-        if self.insert_id.size() == 0 {
+        if self.store.size() == 0 {
             return Ok(Vec::new());
         }
-        let (level, pivot) = self.insert_id.entry();
+        let (level, pivot) = self.store.entry();
         let mut pivot = Point::new(pivot, level);
         let mut qid = Point::new(self.query_id.get(), level);
         qid.arrow = Some(Arc::new(data));

@@ -12,8 +12,9 @@
 //获取 集合向量的数量(包括已经删除的 向量)
 
 use anndists::dist::*;
-use fjall::{Config, PartitionCreateOptions, TxKeyspace, TxPartition};
 use hnsw::HNSW;
+use fjall::{Config, TxKeyspace};
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use anyhow::{anyhow, Result};
@@ -52,33 +53,36 @@ impl Collection {
     }
 }
 
+use crate::store::{KVStore, fjall::FjallStore};
 #[derive(Clone)]
-pub struct ArrowDB {
+pub struct ArrowDB  {
     space: TxKeyspace,
-    collect_partion: TxPartition,
+    //collect_partion: TxPartition,
+    store: FjallStore,
     collections: Arc<RwLock<HashMap<String, Collection>>>,
-    hnsws: Arc<RwLock<HashMap<String, hnsw::HNSW>>>,
+    hnsws: Arc<RwLock<HashMap<String, hnsw::HNSW<FjallStore>>>>,
 }
 
 //需要有一些参数的定义 每一个集合 比如说 max 层数 维度 距离函数 临近数量等
 impl ArrowDB {
     fn add_hnsw(&self, name: &str, collection: &Collection) {
+        let store = FjallStore::open(&self.space, name);
         self.hnsws.write().unwrap().insert(name.into(),
-            hnsw::HNSW::new(name, &self.space, collection.nb_conn, collection.ef, collection.max_layer, Dist::L2)
+            hnsw::HNSW::new(store, collection.nb_conn, collection.ef, collection.max_layer, Dist::L2)
         );
     }
     pub fn new(path: &str)-> Self{
         let space = Config::new(path).open_transactional().unwrap();
         let mut collections = HashMap::new();
-        let collect_partion = space.open_partition("#collections", PartitionCreateOptions::default()).unwrap();
+        let store = FjallStore::open(&space, "#collections");
         let read_tx = space.read_tx();
-        for key in read_tx.keys(&collect_partion) {
+        for key in read_tx.keys(&store.tx) {
             let key = key.unwrap();
-            let slice = read_tx.get(&collect_partion, &key).unwrap().unwrap();
+            let slice = read_tx.get(&store.tx, &key).unwrap().unwrap();
             let c: Collection = rmp_serde::from_slice(&slice).unwrap();
             collections.insert(String::from_utf8(key.to_vec()).unwrap(), c);
         }
-        Self{space, collect_partion, collections: Arc::new(RwLock::new(collections)), hnsws: Arc::new(RwLock::new(HashMap::new())) }
+        Self{space, store, collections: Arc::new(RwLock::new(collections)), hnsws: Arc::new(RwLock::new(HashMap::new())) }
     }
 
     pub fn get_collections(&self)-> Vec<String> {
@@ -87,13 +91,13 @@ impl ArrowDB {
 
     pub fn create_collection(&self, name: &str, dimension: usize)-> Result<()> {
         let c = Collection::dim(dimension);
-        self.collect_partion.insert(name.as_bytes(), rmp_serde::to_vec(&c).unwrap().as_slice())?;
+        self.store.set(Bytes::copy_from_slice(name.as_bytes()), Bytes::from_owner(rmp_serde::to_vec(&c).unwrap()))?;
         self.add_hnsw(name, &c);
         self.collections.write().unwrap().insert(name.into(), c);
         Ok(())
     }
 
-    pub fn get_hnsw(&self, name: &str, dim: usize)-> Result<HNSW> {
+    pub fn get_hnsw(&self, name: &str, dim: usize)-> Result<HNSW<FjallStore>> {
         if let Some(info) = self.collections.read().unwrap().get(name) {
             if info.dimension != dim {
                 return Err(anyhow!("collection dimension {} is not equal {}", info.dimension, dim));
@@ -113,8 +117,9 @@ pub(crate) fn u8_to_vec<T: Clone>(u8_vec: Vec<u8>) -> Vec<T> {
     let len = u8_vec.len() / mem::size_of::<T>();
     let ptr = u8_vec.as_ptr() as *const T;
     mem::forget(u8_vec);
-    unsafe { Vec::from_raw_parts(ptr as *mut T, len, len) }.clone()
+    unsafe { Vec::from_raw_parts(ptr as *mut T, len, len) }//.clone()
 }
+
 
 pub(crate) fn vec_to_u8<T>(vec: Vec<T>) -> Vec<u8> {
     let len = vec.len() * mem::size_of::<T>();
@@ -123,7 +128,17 @@ pub(crate) fn vec_to_u8<T>(vec: Vec<T>) -> Vec<u8> {
     unsafe { Vec::from_raw_parts(ptr as *mut u8, len, len) }
 }
 
+pub(crate) trait PersistID {
+    fn size(&self)-> u64;
+    fn get_id(&self) -> u64;
+    fn entry(&self)-> (usize, u64);
+    fn set_entry(&self, level: usize, id: u64);
+}
+
+pub(crate) const ID_BITS: usize = 64 - 4;              //2 的 4 次方层 最大 0-15 已经足够了
+pub(crate) const ID_MASK: u64 = 0xfffffffffffffffu64;
+
 pub mod hnsw;
 mod layer;
-mod order_id;
+pub mod order_id;
 mod unique_id;

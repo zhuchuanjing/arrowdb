@@ -1,7 +1,5 @@
 #![allow(dead_code)]
-pub(crate) const ID_BITS: usize = 64 - 4;              //2 的 4 次方层 最大 0-15 已经足够了
-pub(crate) const ID_MASK: u64 = 0xfffffffffffffffu64;
-
+use super::{ID_BITS, ID_MASK};
 use std::sync::{Arc, RwLock};
 pub(crate) fn level_id(id: u64, level: usize) -> u64 {
     (level as u64) << ID_BITS | (id & ID_MASK)
